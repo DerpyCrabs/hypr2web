@@ -34,9 +34,10 @@ Settings: transport, FPS, bitrate ceiling, automatic quality, compositor keyboar
 WebCodecs decoder preferences appear only for the WebSocket transport. Auto tries
 hardware support first and falls back to the browser's default decoder.
 
-Automatic quality is enabled by default. Sustained slow decoding reduces 4K to 1440p,
+Automatic quality is disabled by default; resolution, FPS and bitrate remain fixed.
+The experimental opt-in mode uses slow decoding feedback to reduce 4K to 1440p,
 then 1080p, then 30 fps. This favors responsiveness over retaining the requested
-resolution. Disable Auto quality to keep your selected dimensions/FPS.
+resolution. Leave Auto quality disabled to keep your selected dimensions/FPS.
 A reconnect restores the selected quality ceiling. Bitrate recovers gradually;
 resolution is not automatically raised again to avoid oscillation.
 
@@ -51,7 +52,8 @@ Diagnostic URL options:
 - /?size=3840&transport=webrtc — request 4K with WebRTC.
 - /?transport=ws — use WebSocket/WebCodecs video.
 - /?gpu=0 — compare CPU conversion against CUDA (NVENC still encodes).
-- /?adaptive=0 — disable automatic quality for a controlled comparison.
+- /?adaptive=0 — explicitly keep quality fixed (the default).
+- /?adaptive=1 — opt into experimental automatic quality.
 
 ## Pipeline and adaptation
 

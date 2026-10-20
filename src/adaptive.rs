@@ -78,7 +78,10 @@ mod tests {
     use super::*;
     #[test]
     fn backs_off_and_recovers_within_user_cap() {
-        let mut a = Adaptive::new(crate::StreamConfig::default());
+        let mut a = Adaptive::new(crate::StreamConfig {
+            adaptive: true,
+            ..Default::default()
+        });
         a.feedback(Feedback {
             loss: 0.1,
             ..Default::default()
@@ -93,6 +96,7 @@ mod tests {
     fn slow_decoder_reduces_resolution_and_invalid_feedback_is_ignored() {
         let mut a = Adaptive::new(crate::StreamConfig {
             width: 3840,
+            adaptive: true,
             ..Default::default()
         });
         a.feedback(Feedback {
@@ -115,5 +119,23 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(fixed.bitrate, 16_000_000);
+    }
+    #[test]
+    fn default_quality_stays_fixed_despite_persistent_bad_feedback() {
+        let config = crate::StreamConfig {
+            width: 3840,
+            ..Default::default()
+        };
+        assert!(!config.adaptive);
+        let mut a = Adaptive::new(config);
+        for _ in 0..120 {
+            a.feedback(Feedback {
+                decode_ms: 50.,
+                jitter_ms: 100.,
+                loss: 0.2,
+                rtt_ms: 150.,
+            });
+        }
+        assert_eq!((a.width, a.fps, a.bitrate), (3840, 60, 16_000_000));
     }
 }

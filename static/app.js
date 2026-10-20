@@ -13,7 +13,7 @@ for (const id of ['size','rate','bitrate','transport','decodeMode']) {
     const saved = query.get(id) || localStorage.getItem('hypr2web.' + id);
     if (saved && [...$(id).options].some(o => o.value === saved)) $(id).value = saved;
 }
-if(query.has('adaptive')) $('adaptive').checked=query.get('adaptive')!=='0';
+$('adaptive').checked=query.get('adaptive')==='1';
 if (query.get('transport') === 'ws') $('transport').value = 'ws';
 function send(value) { if (ws?.readyState === 1) ws.send(JSON.stringify(value)); }
 function fail(error) {

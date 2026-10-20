@@ -79,7 +79,7 @@ impl Default for StreamConfig {
             fps: 60,
             bitrate: 16_000_000,
             transport: Transport::Webrtc,
-            adaptive: true,
+            adaptive: false,
             gpu: true,
         }
     }
