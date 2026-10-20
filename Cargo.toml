@@ -1,0 +1,29 @@
+[package]
+name = "hypr2web"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Low-latency Hyprland desktop streaming directly to a browser"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+libc = "0.2"
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-scanner = "0.31"
+xkbcommon = "0.9"
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
