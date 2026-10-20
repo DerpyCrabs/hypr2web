@@ -13,9 +13,11 @@ unsafe extern "C" {
         fps: c_int,
         quality: c_int,
         cqp: c_int,
+        gpu: c_int,
         error: *mut c_char,
         len: usize,
     ) -> *mut c_void;
+    fn hypr_nvenc_bitrate(enc: *mut c_void, bitrate: i64);
     fn hypr_nvenc_free(enc: *mut c_void);
     fn hypr_nvenc_encode(
         enc: *mut c_void,
@@ -41,6 +43,7 @@ impl Encoder {
         rgba: bool,
         fps: u32,
         bitrate: u32,
+        gpu: bool,
     ) -> Result<Self> {
         ensure!(
             source.0 > 0 && source.1 > 0 && source.0 <= 16384 && source.1 <= 16384,
@@ -72,6 +75,7 @@ impl Encoder {
                 fps as i32,
                 23,
                 0,
+                i32::from(gpu),
                 err.as_mut_ptr(),
                 err.len(),
             )
@@ -82,6 +86,12 @@ impl Encoder {
             sw: source.0 as usize,
             sh: source.1 as usize,
         })
+    }
+    pub fn set_bitrate(&mut self, bitrate: u32) {
+        // SAFETY: the encoder is exclusively owned and bitrate is validated by the controller.
+        unsafe {
+            hypr_nvenc_bitrate(self.inner.as_ptr(), i64::from(bitrate));
+        }
     }
     pub fn encode(
         &mut self,
@@ -155,7 +165,7 @@ mod tests {
     #[test]
     #[ignore = "requires NVIDIA NVENC"]
     fn hardware_produces_annex_b() {
-        let mut encoder = Encoder::new((640, 480), (320, 240), false, 60, 8_000_000).unwrap();
+        let mut encoder = Encoder::new((640, 480), (320, 240), false, 60, 8_000_000, true).unwrap();
         let frame = encoder
             .encode(&vec![64; 640 * 480 * 4], 640 * 4, false, true)
             .unwrap();
@@ -164,5 +174,106 @@ mod tests {
                 .windows(4)
                 .any(|v| v[..3] == [0, 0, 1] && v[3] & 31 == 5)
         );
+    }
+    #[test]
+    #[ignore = "requires NVIDIA NVENC and ffmpeg"]
+    fn gpu_scaling_colors_and_inversion_roundtrip() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        for rgba in [false, true] {
+            for inverted in [false, true] {
+                let mut pixels = vec![0u8; 640 * 480 * 4];
+                for y in 0..480 {
+                    for x in 0..640 {
+                        let red = if inverted { y >= 240 } else { y < 240 };
+                        let p = &mut pixels[(y * 640 + x) * 4..][..4];
+                        p[if rgba { 0 } else { 2 }] = if red { 255 } else { 0 };
+                        p[if rgba { 2 } else { 0 }] = if red { 0 } else { 255 };
+                        p[3] = 255;
+                    }
+                }
+                let mut encoder =
+                    Encoder::new((640, 480), (320, 240), rgba, 60, 8_000_000, true).unwrap();
+                let packet = encoder.encode(&pixels, 640 * 4, inverted, true).unwrap();
+                let mut child = Command::new("ffmpeg")
+                    .args([
+                        "-v",
+                        "error",
+                        "-f",
+                        "h264",
+                        "-i",
+                        "pipe:0",
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "rawvideo",
+                        "-pix_fmt",
+                        "rgb24",
+                        "pipe:1",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child.stdin.take().unwrap().write_all(&packet).unwrap();
+                let out = child.wait_with_output().unwrap();
+                assert!(out.status.success());
+                assert_eq!(out.stdout.len(), 320 * 240 * 3);
+                let top = &out.stdout[(60 * 320 + 160) * 3..][..3];
+                let bottom = &out.stdout[(180 * 320 + 160) * 3..][..3];
+                assert!(top[0] > 230 && top[1] < 20 && top[2] < 20, "top {top:?}");
+                assert!(
+                    bottom[2] > 230 && bottom[0] < 20 && bottom[1] < 20,
+                    "bottom {bottom:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    #[ignore = "requires NVIDIA NVENC; prints 4K benchmark"]
+    fn benchmark_4k_cpu_vs_cuda() {
+        let pixels = vec![96u8; 3840 * 2160 * 4];
+        for gpu in [false, true] {
+            let mut encoder =
+                Encoder::new((3840, 2160), (3840, 2160), false, 60, 16_000_000, gpu).unwrap();
+            let mut times = Vec::new();
+            for i in 0..65 {
+                if i == 30 {
+                    encoder.set_bitrate(8_000_000);
+                }
+                let t = std::time::Instant::now();
+                let frame = encoder.encode(&pixels, 3840 * 4, false, i == 0).unwrap();
+                assert!(!frame.is_empty());
+                if i >= 5 {
+                    times.push(t.elapsed().as_secs_f64() * 1000.);
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!(
+                "4K gpu={gpu}: median {:.2} ms, p95 {:.2} ms",
+                times[30], times[57]
+            );
+        }
+    }
+    #[test]
+    #[ignore = "requires NVIDIA NVENC; exercises repeated GPU context teardown"]
+    fn repeated_resize_and_reconnect() {
+        let pixels = vec![80u8; 3840 * 2160 * 4];
+        for i in 0..24 {
+            let size = if i % 2 == 0 {
+                (3840, 2160)
+            } else {
+                (2560, 1440)
+            };
+            let mut encoder =
+                Encoder::new((3840, 2160), size, false, 60, 16_000_000, true).unwrap();
+            for frame in 0..8 {
+                encoder
+                    .encode(&pixels, 3840 * 4, false, frame == 0)
+                    .unwrap();
+            }
+            drop(encoder);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }

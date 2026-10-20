@@ -267,9 +267,16 @@ pub fn capture(
         .params
         .context("no supported screen pixel format")?;
     probe.destroy();
-    let size = crate::encoder::fit_size(w, h, config.width);
+    let mut size = crate::encoder::fit_size(w, h, config.width);
     let rgba = matches!(format, wl_shm::Format::Abgr8888 | wl_shm::Format::Xbgr8888);
-    let mut encoder = crate::encoder::Encoder::new((w, h), size, rgba, config.fps, config.bitrate)?;
+    let mut encoder = Some(crate::encoder::Encoder::new(
+        (w, h),
+        size,
+        rgba,
+        config.fps,
+        config.bitrate,
+        config.gpu,
+    )?);
     let bytes = (stride as usize)
         .checked_mul(h as usize)
         .context("capture size overflow")?;
@@ -288,16 +295,48 @@ pub fn capture(
         fps = config.fps,
         "direct NVENC stream started"
     );
-    let period = Duration::from_secs_f64(1. / config.fps as f64);
+    let mut period = Duration::from_secs_f64(1. / config.fps as f64);
+    let mut current_bitrate = config.bitrate;
+    let mut current_fps = config.fps;
     let mut next = Instant::now();
     let mut seq = 0u32;
     while !shared.stop.load(Ordering::Relaxed) {
-        if shared.flow.lock().unwrap().stalled() {
+        if config.transport == crate::Transport::Ws && shared.flow.lock().unwrap().stalled() {
             bail!("browser stopped acknowledging displayed frames");
         }
-        if Instant::now() < next || !shared.flow.lock().unwrap().available() {
+        if Instant::now() < next
+            || (config.transport == crate::Transport::Ws
+                && !shared.flow.lock().unwrap().available())
+            || (config.transport == crate::Transport::Webrtc
+                && !shared.rtc_ready.load(Ordering::Relaxed))
+        {
             std::thread::sleep(Duration::from_millis(1));
             continue;
+        }
+        let (bitrate, width, fps) = {
+            let a = shared.adaptive.lock().unwrap();
+            (a.bitrate, a.width, a.fps)
+        };
+        let new_size = crate::encoder::fit_size(w, h, width);
+        if new_size != size || fps != current_fps {
+            size = new_size;
+            current_fps = fps;
+            drop(encoder.take());
+            encoder = Some(crate::encoder::Encoder::new(
+                (w, h),
+                size,
+                rgba,
+                fps,
+                bitrate,
+                config.gpu,
+            )?);
+            period = Duration::from_secs_f64(1. / fps as f64);
+            shared.keyframe.store(true, Ordering::Relaxed);
+            let _=tx.blocking_send(crate::Outgoing::Json(serde_json::json!({"type":"stream","width":size.0,"height":size.1,"fps":fps,"bitrate":bitrate,"encoder":"NVENC","gpu":config.gpu})));
+        }
+        if bitrate != current_bitrate {
+            encoder.as_mut().unwrap().set_bitrate(bitrate);
+            current_bitrate = bitrate;
         }
         wl.state.params = None;
         wl.state.buffer_done = false;
@@ -317,8 +356,12 @@ pub fn capture(
         frame.destroy();
         let capture_us = captured.elapsed().as_micros().min(u32::MAX as u128) as u32;
         let encoded = Instant::now();
-        let idr = seq == 0 || shared.keyframe.swap(false, Ordering::Relaxed);
-        let data = encoder.encode(&mapping, stride as usize, wl.state.inverted, idr)?;
+        let idr = shared.keyframe.swap(false, Ordering::Relaxed) || seq == 0;
+        let data =
+            encoder
+                .as_mut()
+                .unwrap()
+                .encode(&mapping, stride as usize, wl.state.inverted, idr)?;
         let encode_us = encoded.elapsed().as_micros().min(u32::MAX as u128) as u32;
         seq = seq
             .checked_add(1)
@@ -328,7 +371,10 @@ pub fn capture(
             packet.extend_from_slice(&n.to_le_bytes());
         }
         packet.extend_from_slice(&data);
-        shared.flow.lock().unwrap().sent(seq, captured);
+        *shared.timing.lock().unwrap() = (capture_us as f64 / 1000., encode_us as f64 / 1000.);
+        if config.transport == crate::Transport::Ws {
+            shared.flow.lock().unwrap().sent(seq, captured);
+        }
         if tx
             .blocking_send(crate::Outgoing::Frame(packet.into()))
             .is_err()
