@@ -58,11 +58,25 @@ pub struct Session {
 #[serde(default)]
 pub struct StreamConfig {
     width: u32,
+    height: u32,
     fps: u32,
     bitrate: u32,
     transport: Transport,
     adaptive: bool,
     gpu: bool,
+    profile: Profile,
+}
+#[derive(Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    #[default]
+    Main,
+    Baseline,
+}
+impl Profile {
+    fn is_main(self) -> bool {
+        self == Self::Main
+    }
 }
 #[derive(Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,19 +90,35 @@ impl Default for StreamConfig {
     fn default() -> Self {
         Self {
             width: 1920,
+            height: 8192,
             fps: 60,
             bitrate: 16_000_000,
             transport: Transport::Webrtc,
             adaptive: false,
             gpu: true,
+            profile: Profile::Main,
         }
     }
 }
 impl StreamConfig {
     fn valid(&self) -> bool {
-        [1280, 1920, 2560, 3840].contains(&self.width)
+        Viewport {
+            width: self.width,
+            height: self.height,
+        }
+        .valid()
             && [30, 60].contains(&self.fps)
             && (2_000_000..=50_000_000).contains(&self.bitrate)
+    }
+}
+#[derive(Deserialize)]
+struct Viewport {
+    width: u32,
+    height: u32,
+}
+impl Viewport {
+    fn valid(&self) -> bool {
+        (128..=8192).contains(&self.width) && (128..=8192).contains(&self.height)
     }
 }
 pub enum Outgoing {
@@ -184,7 +214,7 @@ async fn session(mut socket: WebSocket, app: App, config: StreamConfig) {
     };
     let (tx, mut rx) = mpsc::channel::<Outgoing>(2);
     let rtc = if config.transport == Transport::Webrtc {
-        match rtc::Rtc::new(shared.clone(), tx.clone()).await {
+        match rtc::Rtc::new(shared.clone(), tx.clone(), config.profile).await {
             Ok(rtc) => Some(rtc),
             Err(e) => {
                 let _ = socket
@@ -303,6 +333,10 @@ async fn session(mut socket: WebSocket, app: App, config: StreamConfig) {
                     Some("feedback")=>{if last_feedback.elapsed()>=Duration::from_millis(900) && let Ok(feedback)=serde_json::from_value(value) {shared.adaptive.lock().unwrap().feedback(feedback);last_feedback=std::time::Instant::now();}},
 
                     Some("ack")=>{if let Some(seq)=value["seq"].as_u64().and_then(|n|u32::try_from(n).ok()){shared.flow.lock().unwrap().ack(seq);}},
+                    Some("viewport")=>{if let Ok(viewport)=serde_json::from_value::<Viewport>(value) && viewport.valid() {
+                        let mut adaptive=shared.adaptive.lock().unwrap();
+                        adaptive.width=viewport.width;adaptive.height=viewport.height;
+                    }},
                     Some("keyframe")=>{shared.keyframe.store(true,Ordering::Relaxed);},
                     Some("ping")=>{let _=tx.try_send(Outgoing::Json(serde_json::json!({"type":"pong","at":value["at"]})));},
                     _=>{if let Ok(event)=serde_json::from_value::<input::Input>(value)&& input_tx.try_send(event).is_err(){break;}}

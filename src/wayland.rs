@@ -267,7 +267,7 @@ pub fn capture(
         .params
         .context("no supported screen pixel format")?;
     probe.destroy();
-    let mut size = crate::encoder::fit_size(w, h, config.width);
+    let mut size = crate::encoder::fit_size(w, h, config.width, config.height);
     let rgba = matches!(format, wl_shm::Format::Abgr8888 | wl_shm::Format::Xbgr8888);
     let mut encoder = Some(crate::encoder::Encoder::new(
         (w, h),
@@ -276,6 +276,7 @@ pub fn capture(
         config.fps,
         config.bitrate,
         config.gpu,
+        config.profile.is_main(),
     )?);
     let bytes = (stride as usize)
         .checked_mul(h as usize)
@@ -313,11 +314,11 @@ pub fn capture(
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
-        let (bitrate, width, fps) = {
+        let (bitrate, width, height, fps) = {
             let a = shared.adaptive.lock().unwrap();
-            (a.bitrate, a.width, a.fps)
+            (a.bitrate, a.width, a.height, a.fps)
         };
-        let new_size = crate::encoder::fit_size(w, h, width);
+        let new_size = crate::encoder::fit_size(w, h, width, height);
         if new_size != size || fps != current_fps {
             size = new_size;
             current_fps = fps;
@@ -329,6 +330,7 @@ pub fn capture(
                 fps,
                 bitrate,
                 config.gpu,
+                config.profile.is_main(),
             )?);
             period = Duration::from_secs_f64(1. / fps as f64);
             shared.keyframe.store(true, Ordering::Relaxed);

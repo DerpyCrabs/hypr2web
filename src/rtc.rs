@@ -33,13 +33,23 @@ pub struct Rtc {
     feedback: tokio::task::JoinHandle<()>,
 }
 impl Rtc {
-    pub async fn new(shared: Arc<Session>, tx: mpsc::Sender<Outgoing>) -> Result<Self> {
+    pub async fn new(
+        shared: Arc<Session>,
+        tx: mpsc::Sender<Outgoing>,
+        profile: crate::Profile,
+    ) -> Result<Self> {
         let mut media = MediaEngine::default();
         let codec = RTCRtpCodecCapability {
             mime_type: MIME_TYPE_H264.into(),
             clock_rate: 90000,
-            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034"
-                .into(),
+            sdp_fmtp_line: format!(
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={}",
+                if profile.is_main() {
+                    "4d0034"
+                } else {
+                    "42e034"
+                }
+            ),
             rtcp_feedback: vec![
                 RTCPFeedback {
                     typ: "nack".into(),

@@ -11,6 +11,7 @@ pub struct Feedback {
 pub struct Adaptive {
     pub bitrate: u32,
     pub width: u32,
+    pub height: u32,
     pub fps: u32,
     cap: u32,
     enabled: bool,
@@ -23,6 +24,7 @@ impl Adaptive {
         Self {
             bitrate: config.bitrate,
             width: config.width,
+            height: config.height,
             fps: config.fps,
             cap: config.bitrate,
             enabled: config.adaptive,

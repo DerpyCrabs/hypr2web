@@ -14,6 +14,7 @@ unsafe extern "C" {
         quality: c_int,
         cqp: c_int,
         gpu: c_int,
+        main_profile: c_int,
         error: *mut c_char,
         len: usize,
     ) -> *mut c_void;
@@ -44,6 +45,7 @@ impl Encoder {
         fps: u32,
         bitrate: u32,
         gpu: bool,
+        main_profile: bool,
     ) -> Result<Self> {
         ensure!(
             source.0 > 0 && source.1 > 0 && source.0 <= 16384 && source.1 <= 16384,
@@ -73,9 +75,10 @@ impl Encoder {
                 size.1 as i32,
                 i64::from(bitrate),
                 fps as i32,
-                23,
+                16,
                 0,
                 i32::from(gpu),
+                i32::from(main_profile),
                 err.as_mut_ptr(),
                 err.len(),
             )
@@ -148,24 +151,35 @@ fn message(err: &[c_char; 512]) -> String {
         .into_owned()
 }
 
-pub fn fit_size(width: u32, height: u32, max_width: u32) -> (u32, u32) {
-    let w = width.min(max_width) / 2 * 2;
-    let h = ((u64::from(height) * u64::from(w) / u64::from(width)) as u32) / 2 * 2;
-    (w, h)
+pub fn fit_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    let scale = (max_width as f64 / width as f64)
+        .min(max_height as f64 / height as f64)
+        .min(1.0);
+    let even = |n: u32| (n / 2 * 2).max(2);
+    (
+        even((width as f64 * scale) as u32),
+        even((height as f64 * scale) as u32),
+    )
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn preserves_aspect_and_even_sizes() {
-        assert_eq!(fit_size(3840, 2160, 1920), (1920, 1080));
-        assert_eq!(fit_size(3840, 2160, 2560), (2560, 1440));
-        assert_eq!(fit_size(1280, 720, 1920), (1280, 720));
+        assert_eq!(fit_size(3840, 2160, 1768, 2208), (1768, 994));
+        assert_eq!(fit_size(3840, 2160, 2208, 800), (1422, 800));
+        assert_eq!(fit_size(3840, 2160, 8192, 8192), (3840, 2160));
+        assert_eq!(fit_size(3840, 2160, 767, 901), (766, 430));
+        assert_eq!(fit_size(3840, 2160, 1920, 8192), (1920, 1080));
+        assert_eq!(fit_size(3840, 2160, 2560, 8192), (2560, 1440));
+        assert_eq!(fit_size(1280, 720, 1920, 8192), (1280, 720));
     }
     #[test]
     #[ignore = "requires NVIDIA NVENC"]
     fn hardware_produces_annex_b() {
-        let mut encoder = Encoder::new((640, 480), (320, 240), false, 60, 8_000_000, true).unwrap();
+        let mut encoder =
+            Encoder::new((640, 480), (320, 240), false, 60, 8_000_000, true, true).unwrap();
         let frame = encoder
             .encode(&vec![64; 640 * 480 * 4], 640 * 4, false, true)
             .unwrap();
@@ -193,7 +207,7 @@ mod tests {
                     }
                 }
                 let mut encoder =
-                    Encoder::new((640, 480), (320, 240), rgba, 60, 8_000_000, true).unwrap();
+                    Encoder::new((640, 480), (320, 240), rgba, 60, 8_000_000, true, true).unwrap();
                 let packet = encoder.encode(&pixels, 640 * 4, inverted, true).unwrap();
                 let mut child = Command::new("ffmpeg")
                     .args([
@@ -235,7 +249,7 @@ mod tests {
         let pixels = vec![96u8; 3840 * 2160 * 4];
         for gpu in [false, true] {
             let mut encoder =
-                Encoder::new((3840, 2160), (3840, 2160), false, 60, 16_000_000, gpu).unwrap();
+                Encoder::new((3840, 2160), (3840, 2160), false, 60, 16_000_000, gpu, true).unwrap();
             let mut times = Vec::new();
             for i in 0..65 {
                 if i == 30 {
@@ -266,7 +280,7 @@ mod tests {
                 (2560, 1440)
             };
             let mut encoder =
-                Encoder::new((3840, 2160), size, false, 60, 16_000_000, true).unwrap();
+                Encoder::new((3840, 2160), size, false, 60, 16_000_000, true, true).unwrap();
             for frame in 0..8 {
                 encoder
                     .encode(&pixels, 3840 * 4, false, frame == 0)

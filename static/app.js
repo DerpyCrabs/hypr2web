@@ -3,19 +3,25 @@ const $ = id => document.getElementById(id);
 const canvas = $('screen'), video = $('video'), ctx = canvas.getContext('2d', {alpha: false});
 let ws, pc, decoder, generation = 0, received = new Map(), drawn = 0, lastDrawn = 0;
 let lastTick = performance.now(), currentTransport = 'webrtc', previousStats = null, vfCallback = 0;
+let viewportTimer, lastViewport='';
+let h264Profile='main';
 let connectionTimer, feedbackBusy = false, localIce = [], remoteIce = [], answerSent = false;
 const h2w = window.h2w = {
     frames: 0, captureMs: 0, encodeMs: 0, drawMs: 0, decodeMs: 0,
     rtt: 0, ackMs: 0, jitterMs: 0, loss: 0, bitrate: 0, errors: [], fps: 0,
 };
 const query = new URLSearchParams(location.search);
-for (const id of ['size','rate','bitrate','transport','decodeMode']) {
+for (const id of ['rate','bitrate','transport','decodeMode']) {
     const saved = query.get(id) || localStorage.getItem('hypr2web.' + id);
     if (saved && [...$(id).options].some(o => o.value === saved)) $(id).value = saved;
 }
 $('adaptive').checked=query.get('adaptive')==='1';
 if (query.get('transport') === 'ws') $('transport').value = 'ws';
-function send(value) { if (ws?.readyState === 1) ws.send(JSON.stringify(value)); }
+const resetTouchInputs = [];
+function send(value) {
+    if (value.type === 'release') resetTouchInputs.forEach(reset => reset());
+    if (ws?.readyState === 1) ws.send(JSON.stringify(value));
+}
 function fail(error) {
     const text = error.message || String(error);
     h2w.errors.push(text); $('error').textContent = text;
@@ -24,7 +30,7 @@ function fail(error) {
 function disconnect() {
     generation++;
     send({type:'release'});
-    clearTimeout(connectionTimer);
+    clearTimeout(connectionTimer);clearTimeout(viewportTimer);lastViewport='';
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (pc) { pc.close(); pc = null; }
     if (decoder && decoder.state !== 'closed') decoder.close();
@@ -42,7 +48,28 @@ function fitCanvas() {
     const scale = Math.min(r.width / w, r.height / h);
     el.style.width = w * scale + 'px'; el.style.height = h * scale + 'px';
 }
-new ResizeObserver(fitCanvas).observe($('stage'));
+function viewportSize() {
+    const r=$('stage').getBoundingClientRect();
+    const dpr=window.devicePixelRatio || 1;
+    const bound=n=>Math.max(128,Math.min(8192,Math.floor(n*dpr/2)*2));
+    return {width:bound(r.width),height:bound(r.height)};
+}
+function updateViewport() {
+    if(ws?.readyState!==1)return;
+    const size=viewportSize(), signature=JSON.stringify(size);
+    if(signature!==lastViewport){send({type:'viewport',...size});lastViewport=signature;}
+}
+function scheduleViewport() {
+    clearTimeout(viewportTimer);viewportTimer=setTimeout(updateViewport,300);
+}
+new ResizeObserver(()=>{fitCanvas();scheduleViewport();}).observe($('stage'));
+// DPR may change when moving between displays without a CSS resize.
+function watchPixelRatio() {
+    matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener('change',()=>{
+        scheduleViewport();watchPixelRatio();
+    },{once:true});
+}
+watchPixelRatio();
 video.addEventListener('resize', fitCanvas);
 video.addEventListener('loadeddata',()=>{if(currentTransport==='webrtc'&&video.srcObject) connected();});
 function connected() {
@@ -124,7 +151,7 @@ async function handleMessage(e,g) {
         h2w.stream=v;
         if(navigator.mediaCapabilities && currentTransport==='webrtc') {
             navigator.mediaCapabilities.decodingInfo({type:'webrtc',video:{
-                contentType:'video/H264;profile-level-id=42e034;packetization-mode=1',
+                contentType:'video/H264;profile-level-id='+(h264Profile==='main'?'4d0034':'42e034')+';packetization-mode=1',
                 width:v.width,height:v.height,bitrate:v.bitrate,framerate:v.fps,
             }}).then(info=>{if(g===generation) h2w.capability={supported:info.supported,smooth:info.smooth,powerEfficient:info.powerEfficient};}).catch(()=>{});
         }
@@ -169,6 +196,8 @@ async function connect() {
     await new Promise(r=>setTimeout(r,350));if(g!==generation) return;
     localIce=[];remoteIce=[];answerSent=false;
     if(currentTransport==='webrtc') {
+        const codecs=RTCRtpReceiver.getCapabilities('video')?.codecs||[];
+        h264Profile=codecs.some(c=>c.mimeType.toLowerCase()==='video/h264'&&/profile-level-id=4d/i.test(c.sdpFmtpLine||''))?'main':'baseline';
         pc=new RTCPeerConnection({iceServers:[]});
         const peer=pc;
         peer.onicecandidate=e=>{
@@ -190,16 +219,17 @@ async function connect() {
     const url=new URL('/ws',location.href);
     url.protocol=location.protocol==='https:'?'wss:':'ws:';
     url.search=new URLSearchParams({
-        width:$('size').value,fps:$('rate').value,bitrate:$('bitrate').value,
+        ...viewportSize(),fps:$('rate').value,bitrate:$('bitrate').value,
         transport:currentTransport,adaptive:$('adaptive').checked,
-        gpu:query.get('gpu')!=='0',
+        gpu:query.get('gpu')!=='0',profile:currentTransport==='webrtc'?h264Profile:'main',
     });
-    ws=new WebSocket(url);ws.binaryType='arraybuffer';$('status').textContent='Connecting';
+    lastViewport=JSON.stringify(viewportSize());
+    ws=new WebSocket(url);ws.onopen=()=>{if(g===generation)updateViewport();};ws.binaryType='arraybuffer';$('status').textContent='Connecting';
     ws.onclose=()=>{if(g===generation) disconnect();};
     ws.onerror=()=>{if(g===generation) fail('Connection failed');};
     let chain=Promise.resolve();
     ws.onmessage=e=>{chain=chain.then(()=>handleMessage(e,g)).catch(e=>{if(g===generation) fail(e);});};
-    connectionTimer=setTimeout(()=>{if(g===generation) fail('No video received. Try WebSocket in settings or lower resolution.');},12000);
+    connectionTimer=setTimeout(()=>{if(g===generation) fail('No video received. Try WebSocket in settings.');},12000);
 }
 async function collectStats() {
     if(!pc || pc.connectionState!=='connected' || feedbackBusy) return;
@@ -235,16 +265,65 @@ $('connect').onclick=connect;$('pause').onclick=disconnect;
 $('release').onclick=()=>send({type:'release'});
 $('fullscreen').onclick=()=>{if(document.fullscreenElement) document.exitFullscreen();else document.documentElement.requestFullscreen().catch(fail);};
 $('layout').onchange=()=>send({type:'layout',group:Number($('layout').value)});
-for(const id of ['size','rate','bitrate','transport','decodeMode']) $(id).onchange=()=>{
+for(const id of ['rate','bitrate','transport','decodeMode']) $(id).onchange=()=>{
     localStorage.setItem('hypr2web.'+id,$(id).value);connect();
 };
 $('adaptive').onchange=connect;
 function point(e) {const r=e.currentTarget.getBoundingClientRect();send({type:'pointer',x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height});}
 for(const target of [canvas,video]) {
-    target.onpointerdown=e=>{e.preventDefault();target.focus();target.setPointerCapture(e.pointerId);point(e);send({type:'button',button:e.button,down:true});};
-    target.onpointermove=point;
-    target.onpointerup=e=>{point(e);send({type:'button',button:e.button,down:false});if(target.hasPointerCapture(e.pointerId)) target.releasePointerCapture(e.pointerId);};
-    target.onpointercancel=()=>send({type:'release'});target.oncontextmenu=e=>e.preventDefault();
+    const touches = new Map();
+    let scrolling = false, dragging = false;
+    resetTouchInputs.push(() => { touches.clear(); scrolling = dragging = false; });
+    const centerY = () => [...touches.values()].reduce((sum, p) => sum + p.y, 0) / touches.size;
+    target.onpointerdown=e=>{
+        e.preventDefault();
+        // Keep Android's IME open while interacting with the remote desktop.
+        // Prevent the browser's default focus change and do not focus the surface.
+        if(document.activeElement!==nativeInput) target.focus();
+        target.setPointerCapture(e.pointerId);
+        if(e.pointerType!=='touch') {point(e);send({type:'button',button:e.button,down:true});return;}
+        touches.set(e.pointerId,{x:e.clientX,y:e.clientY,startX:e.clientX,startY:e.clientY});
+        if(touches.size===1 && !scrolling) point(e);
+        if(touches.size>1) {
+            // Do not turn the remaining finger back into a click/drag after scrolling.
+            scrolling=true;
+            if(dragging) send({type:'button',button:0,down:false});
+            dragging=false;
+        }
+    };
+    target.onpointermove=e=>{
+        if(e.pointerType!=='touch') {point(e);return;}
+        const touch=touches.get(e.pointerId);if(!touch) return;
+        e.preventDefault();
+        const previousY=centerY();touch.x=e.clientX;touch.y=e.clientY;
+        if(scrolling) {
+            if(touches.size===2) {
+                const delta=previousY-centerY();
+                if(delta) send({type:'wheel',delta});
+            }
+            return;
+        }
+        // Defer the button press so placing a second finger does not click.
+        if(!dragging && Math.hypot(touch.x-touch.startX,touch.y-touch.startY)>=8) {
+            send({type:'button',button:0,down:true});dragging=true;
+        }
+        if(dragging) point(e);
+    };
+    target.onpointerup=e=>{
+        if(e.pointerType==='touch') {
+            if(touches.has(e.pointerId) && !scrolling) {
+                point(e);
+                if(!dragging) send({type:'button',button:0,down:true});
+                send({type:'button',button:0,down:false});
+            }
+            touches.delete(e.pointerId);
+            if(!touches.size) scrolling=dragging=false;
+        } else {point(e);send({type:'button',button:e.button,down:false});}
+        if(target.hasPointerCapture(e.pointerId)) target.releasePointerCapture(e.pointerId);
+    };
+    target.onpointercancel=()=>send({type:'release'});
+    target.onlostpointercapture=e=>{if(touches.has(e.pointerId)) send({type:'release'});};
+    target.oncontextmenu=e=>e.preventDefault();
     target.addEventListener('wheel',e=>{e.preventDefault();send({type:'wheel',delta:e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?240:1)});},{passive:false});
 }
 const codes={Escape:1,Minus:12,Equal:13,Backspace:14,Tab:15,BracketLeft:26,BracketRight:27,Enter:28,ControlLeft:29,Semicolon:39,Quote:40,Backquote:41,ShiftLeft:42,Backslash:43,Comma:51,Period:52,Slash:53,ShiftRight:54,AltLeft:56,Space:57,CapsLock:58,NumLock:69,ScrollLock:70,ControlRight:97,AltRight:100,Home:102,ArrowUp:103,PageUp:104,ArrowLeft:105,ArrowRight:106,End:107,ArrowDown:108,PageDown:109,Insert:110,Delete:111,MetaLeft:125,MetaRight:126};
@@ -252,10 +331,72 @@ const codes={Escape:1,Minus:12,Equal:13,Backspace:14,Tab:15,BracketLeft:26,Brack
 for(const [chars,start]of [['QWERTYUIOP',16],['ASDFGHJKL',30],['ZXCVBNM',44]])[...chars].forEach((c,i)=>codes['Key'+c]=start+i);
 for(let i=1;i<=12;i++)codes['F'+i]=i<=10?58+i:76+i;
 for(const target of [canvas,video])for(const type of ['keydown','keyup'])target.addEventListener(type,e=>{const code=codes[e.code];if(code){e.preventDefault();if(!e.repeat)send({type:'key',code,down:type==='keydown'})}});
-const keyPanel=$('keys');
-for(const row of [['Esc',1,'Tab',15,'⌫',14,'Enter',28,'Space',57,'←',105,'↑',103,'↓',108,'→',106],...'1234567890 QWERTYUIOP ASDFGHJKL ZXCVBNM'.split(' ').map(chars=>[...chars].flatMap(c=>[c,codes[(isNaN(Number(c))?'Key':'Digit')+c]]))]){const line=document.createElement('div');line.style.margin='3px';for(let i=0;i<row.length;i+=2){const b=document.createElement('button');b.textContent=row[i];b.style.margin='2px';b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);send({type:'key',code:row[i+1],down:true})};b.onpointerup=()=>send({type:'key',code:row[i+1],down:false});b.onpointercancel=()=>send({type:'release'});line.append(b)}keyPanel.append(line)}
-for(const [name,code]of [['Shift',42],['Ctrl',29],['Alt',56],['Super',125]]){const b=document.createElement('button');b.textContent=name;b.onclick=()=>{const down=b.dataset.down!=='1';b.dataset.down=down?'1':'0';b.style.background=down?'#31785e':'';send({type:'key',code,down})};keyPanel.append(b)}
-$('keyboard').onclick=()=>{keyPanel.hidden=!keyPanel.hidden;send({type:'release'});keyPanel.querySelectorAll('[data-down]').forEach(b=>{b.dataset.down='0';b.style.background=''})};
+const nativeInput=$('nativeInput'), nativePanel=$('nativeKeyboard');
+let nativeValue='', composing=false;
+let keyboardViewportHeight=0, keyboardViewportShrunk=false;
+const sentinel='\u200b';
+function resetNativeInput() {nativeValue='';nativeInput.value=sentinel;}
+function nativeKey(code) {send({type:'key',code,down:true});send({type:'key',code,down:false});}
+function commitNativeInput() {
+    if(composing)return;
+    const value=nativeInput.value.replace(/^\u200b/,'');
+    const old=[...nativeValue], next=[...value];
+    let common=0;
+    while(common<old.length && common<next.length && old[common]===next[common])common++;
+    for(let i=common;i<old.length;i++)nativeKey(14);
+    const added=next.slice(common);
+    // Keep each text message below the server input limit, including JSON escaping.
+    for(let i=0;i<added.length;i+=512)send({type:'text',text:added.slice(i,i+512).join('')});
+    nativeValue=value;
+    if(!value || value.length>2048)resetNativeInput();
+}
+nativeInput.addEventListener('compositionstart',()=>{composing=true;});
+nativeInput.addEventListener('compositionend',()=>{composing=false;commitNativeInput();});
+nativeInput.addEventListener('input',commitNativeInput);
+nativeInput.addEventListener('beforeinput',e=>{
+    if(composing || e.isComposing)return;
+    if(e.inputType==='insertLineBreak' || e.inputType==='insertParagraph') {
+        e.preventDefault();nativeKey(28);resetNativeInput();
+    } else if(e.inputType==='deleteContentBackward' && !nativeValue) {
+        e.preventDefault();nativeKey(14);resetNativeInput();
+    }
+});
+nativeInput.addEventListener('keydown',e=>{
+    if(e.isComposing || e.keyCode===229)return;
+    const key={Enter:28,Backspace:14,Tab:15,Escape:1,ArrowLeft:105,ArrowRight:106,ArrowUp:103,ArrowDown:108}[e.key];
+    if(key){e.preventDefault();nativeKey(key);resetNativeInput();}
+});
+function closeNativeKeyboard() {
+    commitNativeInput();nativeInput.blur();nativePanel.hidden=true;
+    document.body.classList.remove('keyboard-open');keyboardViewportShrunk=false;
+    $('keyboard').setAttribute('aria-expanded','false');fitCanvas();
+}
+$('keyboard').onclick=()=>{
+    if(!nativePanel.hidden && document.activeElement===nativeInput){closeNativeKeyboard();return;}
+    send({type:'release'});nativePanel.hidden=false;resetNativeInput();
+    keyboardViewportHeight=window.visualViewport?.height || window.innerHeight;
+    keyboardViewportShrunk=false;document.body.classList.add('keyboard-open');
+    $('keyboard').setAttribute('aria-expanded','true');
+    // Focus synchronously inside the tap: Android opens the user's own IME.
+    nativeInput.focus({preventScroll:true});fitCanvas();
+};
+$('keyboard').addEventListener('pointerdown',e=>e.preventDefault());
+nativeInput.addEventListener('blur',()=>document.body.classList.remove('keyboard-open'));
+function fitViewport() {
+    const height=window.visualViewport?.height || window.innerHeight;
+    // Android Back may dismiss the IME without blurring its input.
+    if(!nativePanel.hidden) {
+        if(height<keyboardViewportHeight-100) keyboardViewportShrunk=true;
+        if(keyboardViewportShrunk && height>=keyboardViewportHeight-80) {
+            document.body.classList.remove('keyboard-open');
+            keyboardViewportShrunk=false;
+        }
+    }
+    document.body.style.height=height+'px';fitCanvas();
+}
+window.visualViewport?.addEventListener('resize',fitViewport);
+window.addEventListener('resize',fitViewport);
+fitViewport();
 window.addEventListener('blur',()=>send({type:'release'}));window.addEventListener('pagehide',disconnect);document.addEventListener('visibilitychange',()=>{if(document.hidden)disconnect()});
 setInterval(()=>{
     const now=performance.now();
@@ -273,7 +414,7 @@ setInterval(()=>{
         currentTransport==='webrtc'?'Jitter buf '+n(h2w.jitterMs)+' ms':'Draw      '+n(h2w.drawMs)+' ms',
         'RTT       '+n(h2w.rtt)+' ms',
         currentTransport==='webrtc'?'Loss      '+n(h2w.loss*100)+'%':'Frame→ACK '+n(h2w.ackMs)+' ms',
-        'Bitrate   '+n(h2w.bitrate/1e6)+' Mbps',
+        'Bitrate cap '+n(h2w.bitrate/1e6)+' Mbps',
         'Decoder   '+h2w.decoder+(h2w.powerEfficient===true?' (efficient)':''),
         h2w.capability?'Efficiency hint '+(h2w.capability.powerEfficient?'efficient':'not efficient'):'',
     ].join('\n');

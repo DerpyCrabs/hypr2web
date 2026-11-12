@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     os::fd::AsFd,
     sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
@@ -20,6 +20,7 @@ pub enum Input {
     Button { button: u8, down: bool },
     Wheel { delta: f64 },
     Key { code: u32, down: bool },
+    Text { text: String },
     Release,
     Layout { group: u32 },
 }
@@ -44,6 +45,7 @@ pub fn run(output: String, session: Arc<Session>, rx: mpsc::Receiver<Input>) -> 
         xkb::KEYMAP_COMPILE_NO_FLAGS,
     )
     .context("parse compositor keymap")?;
+    let text_keys = text_key_codes(&keymap);
     let mut state = xkb::State::new(&keymap);
     if let Some(group) = initial_group(&keymap) {
         state.update_mask(0, 0, 0, 0, 0, group);
@@ -56,6 +58,12 @@ pub fn run(output: String, session: Arc<Session>, rx: mpsc::Receiver<Input>) -> 
         .create_virtual_keyboard(&seat, &wl.qh, ());
     let fd = keymap_file(&text)?;
     keyboard.keymap(1, fd.as_fd(), (text.len() + 1) as u32);
+    let text_keyboard =
+        wl.state
+            .keyboard
+            .as_ref()
+            .unwrap()
+            .create_virtual_keyboard(&seat, &wl.qh, ());
     let pointer = wl
         .state
         .pointer
@@ -148,6 +156,26 @@ pub fn run(output: String, session: Arc<Session>, rx: mpsc::Receiver<Input>) -> 
                         }
                     }
                 }
+                Input::Text { text } => {
+                    for ch in text.chars().filter(|c| !c.is_control()) {
+                        if let Some(&(code, mods, group)) = text_keys.get(&ch) {
+                            // Use the same evdev code as a physical keyboard, including in games.
+                            keyboard.modifiers(mods, 0, 0, group);
+                            keyboard.key(time, code, 1);
+                            keyboard.key(time, code, 0);
+                            modifiers(&state);
+                        } else {
+                            // Characters absent from the layout use KEY_UNKNOWN, never Esc/WASD.
+                            let map = unicode_keymap(ch);
+                            let fd = keymap_file(&map)?;
+                            text_keyboard.keymap(1, fd.as_fd(), (map.len() + 1) as u32);
+                            text_keyboard.modifiers(0, 0, 0, 0);
+                            text_keyboard.key(time, 240, 1);
+                            text_keyboard.key(time, 240, 0);
+                        }
+                        wl.conn.flush()?;
+                    }
+                }
                 Input::Layout { group } => {
                     if group < keymap.num_layouts() {
                         state.update_mask(
@@ -189,12 +217,48 @@ pub fn run(output: String, session: Arc<Session>, rx: mpsc::Receiver<Input>) -> 
     pointer.frame();
     modifiers(&state);
     let _ = wl.conn.flush();
+    text_keyboard.destroy();
     keyboard.destroy();
     pointer.destroy();
     physical_keyboard.release();
     let _ = wl.conn.flush();
     result
 }
+fn text_key_codes(keymap: &xkb::Keymap) -> HashMap<char, (u32, u32, u32)> {
+    let mut result = HashMap::new();
+    let mut state = xkb::State::new(keymap);
+    let mask = |name: &str| 1u32.checked_shl(keymap.mod_get_index(name)).unwrap_or(0);
+    let shift = mask("Shift");
+    let altgr = mask("Mod5");
+    for group in 0..keymap.num_layouts() {
+        for mods in [0, shift, altgr, shift | altgr] {
+            state.update_mask(mods, 0, 0, 0, 0, group);
+            for code in 1..=255 {
+                let text = state.key_get_utf8(xkb::Keycode::new(code + 8));
+                let mut chars = text.chars();
+                if let Some(ch) = chars.next()
+                    && chars.next().is_none()
+                    && !ch.is_control()
+                {
+                    result.entry(ch).or_insert((code, mods, group));
+                }
+            }
+        }
+    }
+    result
+}
+fn unicode_keymap(ch: char) -> String {
+    format!(
+        r#"xkb_keymap {{
+        xkb_keycodes "text" {{ minimum = 8; maximum = 255; <TEXT> = 248; }};
+        xkb_types "text" {{ type "ONE_LEVEL" {{ modifiers = None; map[None] = Level1; }}; }};
+        xkb_compatibility "text" {{}};
+        xkb_symbols "text" {{ key <TEXT> {{ [ U{:04X} ] }}; }};
+    }};"#,
+        ch as u32
+    )
+}
+
 fn initial_group(keymap: &xkb::Keymap) -> Option<u32> {
     let output = std::process::Command::new("hyprctl")
         .args(["devices", "-j"])
@@ -233,6 +297,60 @@ pub fn validate_size(n: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_uses_physical_key_codes() {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let map = xkb::Keymap::new_from_names(
+            &context,
+            "evdev",
+            "pc105",
+            "us,ru",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let keys = text_key_codes(&map);
+        for (ch, code) in [
+            ('w', 17),
+            ('a', 30),
+            ('s', 31),
+            ('d', 32),
+            ('D', 32),
+            ('1', 2),
+            (' ', 57),
+            ('в', 32),
+        ] {
+            assert_eq!(keys[&ch].0, code, "{ch} must use its physical key");
+            let (_, mods, group) = keys[&ch];
+            let mut state = xkb::State::new(&map);
+            state.update_mask(mods, 0, 0, 0, 0, group);
+            assert_eq!(
+                state.key_get_utf8(xkb::Keycode::new(code + 8)),
+                ch.to_string()
+            );
+        }
+        assert!(
+            keys.values().all(|&(code, _, _)| code != 1),
+            "text must never send Escape"
+        );
+    }
+    #[test]
+    fn unicode_text_keymap_roundtrip() {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        for ch in "Hello, Привет! 😀é".chars() {
+            let map = xkb::Keymap::new_from_string(
+                &context,
+                unicode_keymap(ch),
+                xkb::KEYMAP_FORMAT_TEXT_V1,
+                xkb::KEYMAP_COMPILE_NO_FLAGS,
+            )
+            .unwrap();
+            let state = xkb::State::new(&map);
+            assert_eq!(state.key_get_utf8(xkb::Keycode::new(248)), ch.to_string());
+            assert_eq!(state.key_get_utf8(xkb::Keycode::new(9)), "");
+        }
+    }
     #[test]
     fn maps_dom_mouse_buttons() {
         assert_eq!(button_code(0), Some(0x110));

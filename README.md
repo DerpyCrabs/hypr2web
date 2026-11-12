@@ -34,22 +34,30 @@ Settings: transport, FPS, bitrate ceiling, automatic quality, compositor keyboar
 WebCodecs decoder preferences appear only for the WebSocket transport. Auto tries
 hardware support first and falls back to the browser's default decoder.
 
-Automatic quality is disabled by default; resolution, FPS and bitrate remain fixed.
-The experimental opt-in mode uses slow decoding feedback to reduce 4K to 1440p,
-then 1080p, then 30 fps. This favors responsiveness over retaining the requested
-resolution. Leave Auto quality disabled to keep your selected dimensions/FPS.
-A reconnect restores the selected quality ceiling. Bitrate recovers gradually;
-resolution is not automatically raised again to avoid oscillation.
+Stream resolution automatically fits the client's available viewport in device pixels
+(CSS size × devicePixelRatio), preserving the monitor's aspect ratio and never upscaling.
+Rotation, window resizing and the system keyboard update the encoder in the existing
+session after a 300 ms debounce. There is no manual resolution selector. Capture still
+reads the monitor at its native size; scaling happens before video encoding/transmission.
 
-Selected resolution/bitrate/FPS/transport preferences persist in this browser.
-The screen accepts pointer/touch and keyboard input when focused. The on-screen
-keyboard uses physical key positions. EN/RU assume compositor layout groups 0/1.
-Shift/Ctrl/Alt/Super latch until toggled or input is released.
+Automatic quality is disabled by default. The experimental opt-in mode can further
+reduce resolution/FPS on slow decoding and adjust bitrate. A viewport change resets
+the resolution ceiling to the new client dimensions.
+
+Bitrate/FPS/transport preferences persist in this browser.
+The screen accepts pointer/touch and keyboard input when focused. On tablets,
+tap to click, drag with one finger, and swipe with two fingers to scroll vertically.
+Lift both fingers before starting another click or drag. The keyboard button in the top toolbar focuses an invisible input and opens the device's
+system keyboard (for example Samsung Keyboard on Android). Tap a remote text field
+first, then open the keyboard. Text, IME commits, Backspace and Enter are forwarded;
+the desktop fits above the system keyboard. Close with Android Back or the keyboard button. No input field is shown on the page.
+No custom on-screen key grid is used. EN/RU in Settings still select the compositor
+layout for physical keyboard input.
 
 Diagnostic URL options:
 
 - /?stats=1 — show overlay (also toggled with the graph icon).
-- /?size=3840&transport=webrtc — request 4K with WebRTC.
+- /?transport=webrtc — use WebRTC with automatic viewport sizing.
 - /?transport=ws — use WebSocket/WebCodecs video.
 - /?gpu=0 — compare CPU conversion against CUDA (NVENC still encodes).
 - /?adaptive=0 — explicitly keep quality fixed (the default).
@@ -131,7 +139,9 @@ Start: ~/.local/share/hypr2web/start.sh
 Stop: systemctl --user stop hypr2web
 Logs: journalctl --user -u hypr2web -f
 
-Transient service, not enabled at login. The start script reuses the trial TLS
+Persistent systemd user service, enabled for the graphical session:
+~/.config/systemd/user/hypr2web.service. Restart: systemctl --user restart hypr2web.
+The service uses target/release/hypr2web and reuses the trial TLS
 certificate/key in ~/.local/share/rdp2web-hypr; renew/trust it as needed.
 The RDP stack remains on port 8081.
 

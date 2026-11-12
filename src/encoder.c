@@ -68,7 +68,7 @@ static void describe_error(char *error, size_t size, const char *operation, int 
 }
 
 HyprNvenc *hypr_nvenc_new(int source_width, int source_height, int rgba, int width, int height, int64_t bitrate, int fps,
-                         int quality, int cqp, int gpu, char *error, size_t error_size) {
+                         int quality, int cqp, int gpu, int main_profile, char *error, size_t error_size) {
     const AVCodec *codec = avcodec_find_encoder_by_name("h264_nvenc");
     if (!codec) {
         snprintf(error, error_size, "FFmpeg was built without h264_nvenc");
@@ -95,10 +95,10 @@ HyprNvenc *hypr_nvenc_new(int source_width, int source_height, int rgba, int wid
     ctx->framerate = (AVRational){fps, 1};
     ctx->gop_size = fps * 2;
     ctx->max_b_frames = 0;
-    ctx->bit_rate = cqp ? 0 : bitrate;
+    ctx->bit_rate = 0;
     ctx->rc_max_rate = bitrate;
-    ctx->rc_buffer_size = bitrate / fps * 2;
-    ctx->color_range = AVCOL_RANGE_MPEG;
+    ctx->rc_buffer_size = 0;
+    ctx->color_range = AVCOL_RANGE_JPEG;
     ctx->colorspace = AVCOL_SPC_BT709;
     ctx->color_primaries = AVCOL_PRI_BT709;
     ctx->color_trc = AVCOL_TRC_BT709;
@@ -108,21 +108,18 @@ HyprNvenc *hypr_nvenc_new(int source_width, int source_height, int rgba, int wid
     result = av_opt_set(ctx->priv_data, name, value, 0); \
     if (result < 0) goto fail; \
 } while (0)
-    SET_OPTION("preset", "p1");
+    SET_OPTION("preset", "p4");
     SET_OPTION("tune", "ull");
     SET_OPTION("zerolatency", "1");
     SET_OPTION("delay", "0");
     SET_OPTION("rc-lookahead", "0");
     SET_OPTION("forced-idr", "1");
-    SET_OPTION("profile", "baseline");
-    SET_OPTION("rc", cqp ? "constqp" : "cbr");
-    // CQ overrides averageBitRate and VBV in FFmpeg even when RC is CBR.
-    // Set quality only for explicitly requested constant-QP mode.
-    if(cqp) {
-        operation = "set NVENC constant QP";
-        result = av_opt_set_int(ctx->priv_data, "qp", quality, 0);
-        if (result < 0) goto fail;
-    }
+    SET_OPTION("profile", main_profile ? "main" : "baseline");
+    SET_OPTION("rc", cqp ? "constqp" : "vbr");
+    // CQ intentionally prioritizes detail. Keep only a max-rate ceiling, not a two-frame VBV.
+    operation="set quality target";
+    result=av_opt_set_int(ctx->priv_data,cqp ? "qp" : "cq",quality,0);
+    if(result<0)goto fail;
 #undef SET_OPTION
     if(gpu) {
         operation="create CUDA device";
@@ -170,7 +167,7 @@ HyprNvenc *hypr_nvenc_new(int source_width, int source_height, int rgba, int wid
     if (!enc->scale) goto fail;
     operation = "set BT.709 full-range conversion";
     const int *matrix = sws_getCoefficients(SWS_CS_ITU709);
-    result = sws_setColorspaceDetails(enc->scale, matrix, 1, matrix, 0, 0, 1 << 16, 1 << 16);
+    result = sws_setColorspaceDetails(enc->scale, matrix, 1, matrix, 1, 0, 1 << 16, 1 << 16);
     if (result < 0) goto fail;
     }
     return enc;
@@ -237,7 +234,7 @@ fail:
 }
 
 void hypr_nvenc_bitrate(HyprNvenc *enc, int64_t bitrate) {
-    enc->codec->bit_rate=bitrate;
+    enc->codec->bit_rate=0;
     enc->codec->rc_max_rate=bitrate;
-    enc->codec->rc_buffer_size=bitrate * enc->codec->time_base.num / enc->codec->time_base.den * 2;
+    enc->codec->rc_buffer_size=0;
 }
